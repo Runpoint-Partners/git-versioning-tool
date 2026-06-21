@@ -60,14 +60,23 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.rollback }}" ]; then
-            info="$(npx rpv rollback-target "${{ inputs.rollback }}" "${{ inputs.rollback }}" 2>/dev/null || echo '{"version":"${{ inputs.rollback }}","tag":"v${{ inputs.rollback }}"}')"
-            echo "create=false" >> "$GITHUB_OUTPUT"
+            rb="${{ inputs.rollback }}"
+            if echo "$rb" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+              info="$(npx rpv rollback-target "$rb" "$rb")"            # explicit version
+            else
+              url="$(npx rpv config get channels.${{ inputs.channel }}.url $PKG_FLAG)" # spec (minor/major) relative to live
+              current="$(curl -fsS "$url/version" | jq -r .version)"
+              info="$(npx rpv rollback-target "$current" "$rb")"
+            fi
+            git checkout --quiet "$(echo "$info" | jq -r .tag)"        # deploy the rolled-back code
+            create=false
           else
             info="$(npx rpv resolve-release --release=${{ inputs.release }})"
-            echo "create=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).createTag))')" >> "$GITHUB_OUTPUT"
+            create="$(echo "$info" | jq -r .createTag)"
           fi
-          echo "version=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).version))')" >> "$GITHUB_OUTPUT"
-          echo "tag=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).tag))')" >> "$GITHUB_OUTPUT"
+          echo "create=$create" >> "$GITHUB_OUTPUT"
+          echo "version=$(echo "$info" | jq -r .version)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(echo "$info" | jq -r .tag)" >> "$GITHUB_OUTPUT"
 
       - name: Cut release tag
         if: steps.rel.outputs.create == 'true'
