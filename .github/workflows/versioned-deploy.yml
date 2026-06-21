@@ -18,6 +18,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the vMAJOR.MINOR.0 release tag
     env:
       # Project config references these as "$NAME"; map secrets/vars to them once here.
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}

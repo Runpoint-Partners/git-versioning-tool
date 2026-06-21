@@ -8,9 +8,9 @@
   "bin": { "rpv": "index.js" },
   "exports": {
     ".": "./index.js",
-    "./ci": "./lib/ci.js",
     "./config": "./lib/config.js",
-    "./runtime": "./lib/runtime.js"
+    "./runtime": "./lib/runtime.js",
+    "./package.json": "./package.json"
   },
   "files": ["index.js", "lib/"],
   "scripts": {
