@@ -39,7 +39,8 @@ jobs:
         with: { node-version: ${{ inputs.node-version }} }
 
       - name: Install rpv (public package; no consumer deps on the runner)
-        run: npm install -g github:Runpoint-Partners/git-versioning-tool#v1.0.0
+        # git+https (not the github: shorthand, which resolves to SSH and fails on a bare runner)
+        run: npm install -g git+https://github.com/Runpoint-Partners/git-versioning-tool.git#v1.0.0
 
       - name: Resolve strategy
         id: strat
