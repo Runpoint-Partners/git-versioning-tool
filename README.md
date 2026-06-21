@@ -78,4 +78,4 @@ app.get('/version', (_req, res) => res.json(readVersion({
 })));
 ```
 
-New repo? → **[SETUP.md](SETUP.md)**.
+New repo? → **[SETUP.md](SETUP.md)**. Going to production? → **[PREFLIGHT.md](PREFLIGHT.md)** (promotion checklist) + **[ENV-STANDARD.md](ENV-STANDARD.md)** (canonical env-var naming).
