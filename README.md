@@ -6,14 +6,14 @@ file**: `MAJOR.MINOR.PATCH` is derived from git tags + commits, and a generated 
 at `GET /version` lets you prove what's actually live (`verify` re-derives the SHA, so a hand-edit to
 a box shows up as a `MISMATCH`).
 
-Distributed as a private npm package consumed via git-tag — no vendored copy to drift.
+Distributed as an npm package consumed via git-tag — no vendored copy to drift.
 
 ## Install
 
 ```jsonc
 // consumer package.json
 "devDependencies": {
-  "@runpoint-partners/versioning": "github:GitSmart86/git-versioning-tool#v1.0.0"
+  "@runpoint-partners/versioning": "github:Runpoint-Partners/git-versioning-tool#v1.0.0"
 }
 ```
 
@@ -44,12 +44,12 @@ default**; `"$NAME"` strings resolve from the environment (secrets are reference
 
 ```jsonc
 "versioning": {
-  "appName": "editor",
+  "appName": "myapp",
   "preset": "server-ssh",
-  "channels": { "production": { "url": "$PRODUCTION_URL", "stampPath": "src/build-stamp.json" } },
+  "channels": { "production": { "url": "$PRODUCTION_URL", "stampPath": "build-stamp.json" } },
   "deploy": {
-    "strategy": "server-ssh", "host": "$DEPLOY_HOST", "appRoot": "/home/ec2-user/app",
-    "sshKey": "$DEPLOY_SSH_KEY_PATH", "processes": [{ "name": "editor", "script": "src/server.js" }]
+    "strategy": "server-ssh", "host": "$DEPLOY_HOST", "appRoot": "/srv/myapp",
+    "sshKey": "$DEPLOY_SSH_KEY_PATH", "processes": [{ "name": "myapp", "script": "index.js" }]
   }
 }
 ```
@@ -58,10 +58,10 @@ The **version core** (resolve / stamp / verify) is uniform; the **deploy strateg
 
 | Preset | Strategy | For |
 |---|---|---|
-| `server-ssh` | rsync `--delete` + pm2 restart over SSH | long-running Node hosts (editor, analytics) |
-| `static-s3` | `aws s3 sync` (+ optional CloudFront invalidation) | static artifacts (player) |
-| `library` | none — the git tag is the release | libs consumed via git-tag (adapters, SCORM-Builder) |
-| `custom` | runs a repo-declared command | bespoke pipelines (migrator) |
+| `server-ssh` | rsync `--delete` + pm2 restart over SSH | a long-running Node host |
+| `static-s3` | `aws s3 sync` (+ optional CloudFront invalidation) | a static artifact in S3 |
+| `library` | none — the git tag is the release | a package consumed via git-tag |
+| `custom` | runs a repo-declared command | a bespoke deploy pipeline |
 
 Bring your own by pointing `deploy.strategy` at a module path implementing
 `{ name, validate(cfg), async deploy(ctx) }`. Monorepos declare `packages: [...]` and select with
@@ -74,8 +74,9 @@ A running app imports only the tiny reader (never the deploy CLI):
 ```js
 const { readVersion } = require('@runpoint-partners/versioning/runtime');
 app.get('/version', (_req, res) => res.json(readVersion({
-  name: 'editor', stampPath: path.join(__dirname, 'build-stamp.json'), packageJson: '../package.json',
+  name: 'myapp', stampPath: path.join(__dirname, 'build-stamp.json'), packageJson: '../package.json',
 })));
 ```
 
-New repo? → **[SETUP.md](SETUP.md)**. Going to production? → **[PREFLIGHT.md](PREFLIGHT.md)** (promotion checklist) + **[ENV-STANDARD.md](ENV-STANDARD.md)** (canonical env-var naming).
+New repo? → **[SETUP.md](SETUP.md)**. Define a per-project env-var standard + a promotion preflight
+checklist (kept with each consumer's private config) and validate it with `rpv config print`.

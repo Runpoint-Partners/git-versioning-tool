@@ -7,7 +7,7 @@ Adoption is: install → configure → wire one workflow. ~10 lines, no vendored
 ```jsonc
 // package.json
 "devDependencies": {
-  "@runpoint-partners/versioning": "github:GitSmart86/git-versioning-tool#v1.0.0"
+  "@runpoint-partners/versioning": "github:Runpoint-Partners/git-versioning-tool#v1.0.0"
 }
 ```
 ```bash
@@ -50,7 +50,7 @@ on:
       rollback: { type: string, default: "" }
 jobs:
   deploy:
-    uses: GitSmart86/git-versioning-tool/.github/workflows/versioned-deploy.yml@v1
+    uses: Runpoint-Partners/git-versioning-tool/.github/workflows/versioned-deploy.yml@v1.0.0
     with:
       channel:  ${{ inputs.channel }}
       release:  ${{ inputs.release }}

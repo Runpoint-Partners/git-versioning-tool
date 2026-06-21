@@ -1,8 +1,9 @@
 # Reusable deploy workflow — the single source of deploy logic for every consuming repo.
 # A consumer adds a thin caller (see SETUP.md) and this does the rest: resolve the release,
 # cut + push the tag, stamp the provenance certificate, run the configured deploy strategy,
-# and verify. All project specifics come from the consumer's committed `versioning` config;
-# secrets come from the caller via `secrets: inherit`.
+# and verify. All project specifics come from the consumer's committed `versioning` config.
+# rpv is installed from this PUBLIC repo (no token); deploy secrets are passed by the caller
+# (explicitly or via `secrets: inherit`).
 name: versioned-deploy
 
 on:
@@ -14,6 +15,9 @@ on:
       rollback:     { type: string, required: false, default: "", description: "version to redeploy (e.g. 1.3.0)" }
       ref:          { type: string, required: false, default: "main" }
       node-version: { type: string, required: false, default: "20" }
+    secrets:
+      DEPLOY_SSH_KEY: { required: false } # server-ssh; caller may map an existing key to this name
+      AWS_ROLE_ARN:   { required: false } # static-s3
 
 jobs:
   deploy:
@@ -21,10 +25,10 @@ jobs:
     permissions:
       contents: write   # push the vMAJOR.MINOR.0 release tag
     env:
-      # Project config references these as "$NAME"; map secrets/vars to them once here.
+      # Project config references these as "$NAME"; map vars/secrets to them once here.
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       STAGING_URL: ${{ vars.STAGING_URL }}
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_SSH_KEY_PATH: ${{ github.workspace }}/.rpv/deploy_key
       PKG_FLAG: ${{ inputs.package != '' && format('--package={0}', inputs.package) || '' }}
     steps:
@@ -34,12 +38,12 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: ${{ inputs.node-version }} }
 
-      - name: Install (brings in the rpv CLI as a devDependency)
-        run: npm ci
+      - name: Install rpv (public package; no consumer deps on the runner)
+        run: npm install -g github:Runpoint-Partners/git-versioning-tool#v1.0.0
 
       - name: Resolve strategy
         id: strat
-        run: echo "name=$(npx rpv config get deploy.strategy --channel=${{ inputs.channel }} $PKG_FLAG)" >> "$GITHUB_OUTPUT"
+        run: echo "name=$(rpv config get deploy.strategy --channel=${{ inputs.channel }} $PKG_FLAG)" >> "$GITHUB_OUTPUT"
 
       - name: Configure SSH (server-ssh)
         if: steps.strat.outputs.name == 'server-ssh'
@@ -64,16 +68,16 @@ jobs:
           if [ -n "${{ inputs.rollback }}" ]; then
             rb="${{ inputs.rollback }}"
             if echo "$rb" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-              info="$(npx rpv rollback-target "$rb" "$rb")"            # explicit version
+              info="$(rpv rollback-target "$rb" "$rb")"            # explicit version
             else
-              url="$(npx rpv config get channels.${{ inputs.channel }}.url $PKG_FLAG)" # spec (minor/major) relative to live
+              url="$(rpv config get channels.${{ inputs.channel }}.url $PKG_FLAG)" # spec (minor/major) relative to live
               current="$(curl -fsS "$url/version" | jq -r .version)"
-              info="$(npx rpv rollback-target "$current" "$rb")"
+              info="$(rpv rollback-target "$current" "$rb")"
             fi
             git checkout --quiet "$(echo "$info" | jq -r .tag)"        # deploy the rolled-back code
             create=false
           else
-            info="$(npx rpv resolve-release --release=${{ inputs.release }})"
+            info="$(rpv resolve-release --release=${{ inputs.release }})"
             create="$(echo "$info" | jq -r .createTag)"
           fi
           echo "create=$create" >> "$GITHUB_OUTPUT"
@@ -90,11 +94,11 @@ jobs:
           git push origin "${{ steps.rel.outputs.tag }}"
 
       - name: Stamp provenance
-        run: npx rpv stamp --channel=${{ inputs.channel }} --version=${{ steps.rel.outputs.version }} $PKG_FLAG
+        run: rpv stamp --channel=${{ inputs.channel }} --version=${{ steps.rel.outputs.version }} $PKG_FLAG
 
       - name: Deploy
-        run: npx rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG
+        run: rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG
 
       - name: Verify
         continue-on-error: true # informational; libraries / no-URL channels have nothing to hit
-        run: npx rpv verify --${{ inputs.channel }} $PKG_FLAG
+        run: rpv verify --${{ inputs.channel }} $PKG_FLAG

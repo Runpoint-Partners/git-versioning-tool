@@ -41,45 +41,45 @@ test('static-s3 + custom + library validate', () => {
 test('server-ssh.deploy (dry-run) emits rsync + ssh/pm2 without executing', async () => {
   const lines = [];
   await strategies.load('server-ssh').deploy({
-    cfg: { appName: 'editor', deploy: {
-      host: 'box', user: 'ec2-user', appRoot: '/srv/app', sshKey: '/tmp/key',
-      processes: [{ name: 'editor', script: 'src/server.js' }],
+    cfg: { appName: 'myapp', deploy: {
+      host: 'box', user: 'ec2-user', appRoot: '/srv/myapp', sshKey: '/tmp/key',
+      processes: [{ name: 'myapp', script: 'index.js' }],
     } },
     dryRun: true, log: (m) => lines.push(m),
   });
   const out = lines.join('\n');
-  assert.match(out, /\(dry-run\) rsync .*--delete.*ec2-user@box:\/srv\/app\//);
-  assert.match(out, /pm2 start src\/server\.js --name 'editor'/);
+  assert.match(out, /\(dry-run\) rsync .*--delete.*ec2-user@box:\/srv\/myapp\//);
+  assert.match(out, /pm2 start index\.js --name 'myapp'/);
   assert.match(out, /npm ci --omit=dev/);
 });
 
 test('server-ssh.deploy runs preRemote box steps after rsync, before npm ci', async () => {
   const lines = [];
   await strategies.load('server-ssh').deploy({
-    cfg: { appName: 'editor', deploy: {
-      host: 'box', appRoot: '/srv/app', sshKey: '/tmp/key',
-      processes: [{ name: 'editor', script: 'src/server.js' }],
-      preRemote: ['test -f .env || cp /home/ec2-user/app/.env .env', 'bash scripts/deploy/enable-lms-writes.sh'],
+    cfg: { appName: 'myapp', deploy: {
+      host: 'box', appRoot: '/srv/myapp', sshKey: '/tmp/key',
+      processes: [{ name: 'myapp', script: 'index.js' }],
+      preRemote: ['test -f .env || cp /opt/shared/.env .env', 'bash scripts/deploy/prep.sh'],
     } },
     dryRun: true, log: (m) => lines.push(m),
   });
-  const ssh = lines.find((l) => l.includes('cp /home/ec2-user/app/.env'));
+  const ssh = lines.find((l) => l.includes('cp /opt/shared/.env'));
   assert.ok(ssh, 'preRemote commands should appear in the ssh chain');
-  assert.ok(ssh.indexOf('enable-lms-writes.sh') < ssh.indexOf('npm ci'), 'preRemote runs before npm ci');
+  assert.ok(ssh.indexOf('prep.sh') < ssh.indexOf('npm ci'), 'preRemote runs before npm ci');
 });
 
 test('static-s3.deploy (dry-run) emits aws s3 sync to the prefixed bucket', async () => {
   const lines = [];
   await strategies.load('static-s3').deploy({
-    cfg: { appName: 'player', deploy: { bucket: 'aaa-courses', prefix: '/player/v1/', artifactDir: 'dist', cacheControl: 'no-cache' } },
+    cfg: { appName: 'myapp', deploy: { bucket: 'example-bucket', prefix: '/app/v1/', artifactDir: 'dist', cacheControl: 'no-cache' } },
     dryRun: true, log: (m) => lines.push(m),
   });
-  assert.match(lines.join('\n'), /\(dry-run\) aws s3 sync dist s3:\/\/aaa-courses\/player\/v1\/ --delete --cache-control no-cache/);
+  assert.match(lines.join('\n'), /\(dry-run\) aws s3 sync dist s3:\/\/example-bucket\/app\/v1\/ --delete --cache-control no-cache/);
 });
 
 test('validate() composes appName + strategy field checks + missing env', () => {
   const report = validate({
-    appName: 'editor',
+    appName: 'myapp',
     deploy: { strategy: 'server-ssh', host: 'h', appRoot: '/a' }, // missing sshKey + processes
     _meta: { envRefs: [{ ref: 'A', set: true }, { ref: 'B', set: false }] },
   });
