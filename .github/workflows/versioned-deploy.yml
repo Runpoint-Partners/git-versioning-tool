@@ -1,0 +1,89 @@
+# Reusable deploy workflow — the single source of deploy logic for every consuming repo.
+# A consumer adds a thin caller (see SETUP.md) and this does the rest: resolve the release,
+# cut + push the tag, stamp the provenance certificate, run the configured deploy strategy,
+# and verify. All project specifics come from the consumer's committed `versioning` config;
+# secrets come from the caller via `secrets: inherit`.
+name: versioned-deploy
+
+on:
+  workflow_call:
+    inputs:
+      channel:      { type: string, required: true,  description: "production | staging" }
+      package:      { type: string, required: false, default: "", description: "monorepo package name" }
+      release:      { type: string, required: false, default: "minor", description: "minor | major" }
+      rollback:     { type: string, required: false, default: "", description: "version to redeploy (e.g. 1.3.0)" }
+      ref:          { type: string, required: false, default: "main" }
+      node-version: { type: string, required: false, default: "20" }
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # Project config references these as "$NAME"; map secrets/vars to them once here.
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+      DEPLOY_SSH_KEY_PATH: ${{ github.workspace }}/.rpv/deploy_key
+      PKG_FLAG: ${{ inputs.package != '' && format('--package={0}', inputs.package) || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: ${{ inputs.ref }}, fetch-depth: 0 } # full history + tags for version math
+
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ inputs.node-version }} }
+
+      - name: Install (brings in the rpv CLI as a devDependency)
+        run: npm ci
+
+      - name: Resolve strategy
+        id: strat
+        run: echo "name=$(npx rpv config get deploy.strategy --channel=${{ inputs.channel }} $PKG_FLAG)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH (server-ssh)
+        if: steps.strat.outputs.name == 'server-ssh'
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$(dirname "$DEPLOY_SSH_KEY_PATH")"
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$DEPLOY_SSH_KEY_PATH"
+          chmod 600 "$DEPLOY_SSH_KEY_PATH"
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Configure AWS (static-s3)
+        if: steps.strat.outputs.name == 'static-s3'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+
+      - name: Resolve release
+        id: rel
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.rollback }}" ]; then
+            info="$(npx rpv rollback-target "${{ inputs.rollback }}" "${{ inputs.rollback }}" 2>/dev/null || echo '{"version":"${{ inputs.rollback }}","tag":"v${{ inputs.rollback }}"}')"
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          else
+            info="$(npx rpv resolve-release --release=${{ inputs.release }})"
+            echo "create=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).createTag))')" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).version))')" >> "$GITHUB_OUTPUT"
+          echo "tag=$(echo "$info" | npx --no-install node -e 'process.stdin.once("data",d=>console.log(JSON.parse(d).tag))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cut release tag
+        if: steps.rel.outputs.create == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.rel.outputs.tag }}" -m "Release ${{ steps.rel.outputs.version }} (${{ inputs.channel }})"
+          git push origin "${{ steps.rel.outputs.tag }}"
+
+      - name: Stamp provenance
+        run: npx rpv stamp --channel=${{ inputs.channel }} --version=${{ steps.rel.outputs.version }} $PKG_FLAG
+
+      - name: Deploy
+        run: npx rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG
+
+      - name: Verify
+        continue-on-error: true # informational; libraries / no-URL channels have nothing to hit
+        run: npx rpv verify --${{ inputs.channel }} $PKG_FLAG
