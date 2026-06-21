@@ -33,10 +33,13 @@ jobs:
       PKG_FLAG: ${{ inputs.package != '' && format('--package={0}', inputs.package) || '' }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: ${{ inputs.ref }}, fetch-depth: 0 } # full history + tags for version math
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0 # full history + tags for version math
 
       - uses: actions/setup-node@v4
-        with: { node-version: ${{ inputs.node-version }} }
+        with:
+          node-version: ${{ inputs.node-version }}
 
       - name: Install rpv (public package; no consumer deps on the runner)
         # git+https (not the github: shorthand, which resolves to SSH and fails on a bare runner)
