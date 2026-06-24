@@ -29,6 +29,7 @@ jobs:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       STAGING_URL: ${{ vars.STAGING_URL }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
       DEPLOY_SSH_KEY_PATH: ${{ github.workspace }}/.rpv/deploy_key
       PKG_FLAG: ${{ inputs.package != '' && format('--package={0}', inputs.package) || '' }}
     steps:
@@ -43,7 +44,7 @@ jobs:
 
       - name: Install rpv (public package; no consumer deps on the runner)
         # git+https (not the github: shorthand, which resolves to SSH and fails on a bare runner)
-        run: npm install -g git+https://github.com/Runpoint-Partners/git-versioning-tool.git#v1.0.0
+        run: npm install -g git+https://github.com/Runpoint-Partners/git-versioning-tool.git#v1.1.0
 
       - name: Resolve strategy
         id: strat
@@ -56,7 +57,10 @@ jobs:
           install -m 700 -d ~/.ssh "$(dirname "$DEPLOY_SSH_KEY_PATH")"
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$DEPLOY_SSH_KEY_PATH"
           chmod 600 "$DEPLOY_SSH_KEY_PATH"
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Resolve the PER-CHANNEL host (channels.<channel>.deploy.host overrides the base) so a
+          # separate staging box is keyscanned — not the base/production host.
+          host="$(rpv config get deploy.host --channel=${{ inputs.channel }} $PKG_FLAG)"
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Configure AWS (static-s3)
         if: steps.strat.outputs.name == 'static-s3'
@@ -69,6 +73,14 @@ jobs:
         id: rel
         run: |
           set -euo pipefail
+          # Staging is continuous (deploys on every push) — it NEVER cuts a release tag; it stamps the
+          # current PATCH version (rpv stamp's default) instead. Only production cuts vMAJOR.MINOR.0 tags.
+          if [ "${{ inputs.channel }}" != "production" ] && [ -z "${{ inputs.rollback }}" ]; then
+            echo "create=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "${{ inputs.rollback }}" ]; then
             rb="${{ inputs.rollback }}"
             if echo "$rb" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
@@ -98,7 +110,12 @@ jobs:
           git push origin "${{ steps.rel.outputs.tag }}"
 
       - name: Stamp provenance
-        run: rpv stamp --channel=${{ inputs.channel }} --version=${{ steps.rel.outputs.version }} $PKG_FLAG
+        run: |
+          if [ -n "${{ steps.rel.outputs.version }}" ]; then
+            rpv stamp --channel=${{ inputs.channel }} --version="${{ steps.rel.outputs.version }}" $PKG_FLAG
+          else
+            rpv stamp --channel=${{ inputs.channel }} $PKG_FLAG   # staging: stamp the current PATCH version
+          fi
 
       - name: Deploy
         run: rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG

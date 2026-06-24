@@ -64,6 +64,32 @@ test('channel selection exposes channelConfig for the requested channel', () => 
   assert.equal(c.channelConfig.stampPath, 'src/build-stamp.json');
 });
 
+test('channels.<channel>.deploy merges over the base deploy (per-channel host for a separate box)', () => {
+  const cwd = fixture({ 'package.json': pkg({
+    appName: 'a', preset: 'server-ssh',
+    deploy: { host: '$DEPLOY_HOST', appRoot: '/srv/app' },
+    channels: {
+      production: { url: 'https://prod.example', stampPath: 's' },
+      staging: { url: 'http://stage.example', stampPath: 's', deploy: { host: '$STAGING_DEPLOY_HOST' } },
+    },
+  }) });
+  const env = { DEPLOY_HOST: 'prod.box', STAGING_DEPLOY_HOST: 'stage.box' };
+
+  // production has no per-channel deploy → base host is used, untouched.
+  const prod = config.resolve({ cwd, channel: 'production', env });
+  assert.equal(prod.deploy.host, 'prod.box');
+  assert.equal(prod.deploy.appRoot, '/srv/app');
+
+  // staging's channel deploy override wins for host; the base appRoot is preserved (merge, not replace).
+  const stage = config.resolve({ cwd, channel: 'staging', env });
+  assert.equal(stage.deploy.host, 'stage.box');
+  assert.equal(stage.deploy.appRoot, '/srv/app');
+
+  // no channel selected → base deploy is unchanged (backward compatible).
+  const none = config.resolve({ cwd, env });
+  assert.equal(none.deploy.host, 'prod.box');
+});
+
 test('monorepo: requires --package, rejects unknown, merges shared < package', () => {
   const cwd = fixture({ 'versioning.config.js':
     `module.exports = ${JSON.stringify({
