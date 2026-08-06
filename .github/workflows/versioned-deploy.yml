@@ -120,6 +120,45 @@ jobs:
       - name: Deploy
         run: rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG
 
+      # ── VERIFICATION IS A GATE, NOT A NOTE ──────────────────────────────────────────────────
+      # This step used to run under `continue-on-error: true`, justified as "informational;
+      # libraries / no-URL channels have nothing to hit". That justification did not hold. A
+      # channel with no URL exits **2** (`verify: no URL for <env>`), so it was never the code
+      # being swallowed. What WAS being swallowed:
+      #
+      #   exit 1  INCONSISTENT  the live version does not match the commit git says was deployed
+      #                         — tamper, misdeploy, or a rollback that did not take
+      #   exit 3  UNVERIFIABLE  the site never answered /version, or the environment is unstamped
+      #
+      # Both are real post-deploy failures, and both reported the whole deploy green.
+      #
+      # So "can this channel be verified at all?" is now answered BEFORE verifying, from config,
+      # instead of being guessed afterwards from an exit code:
+      #   no channels.<channel>.url  -> nothing to hit; SKIP, and say so loudly
+      #   a URL is declared          -> verification is meaningful, so its verdict BINDS
+      #
+      # Green on this job now means the live environment really is on the commit this run shipped.
+      - name: Can this channel be verified?
+        id: verifiable
+        run: |
+          set -euo pipefail
+          # No `|| true`: if config cannot be resolved this must fail the deploy, not quietly
+          # resolve to empty and skip verification.
+          url="$(rpv config get channelConfig.url --channel=${{ inputs.channel }} $PKG_FLAG)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
       - name: Verify
-        continue-on-error: true # informational; libraries / no-URL channels have nothing to hit
+        if: steps.verifiable.outputs.url != ''
         run: rpv verify --${{ inputs.channel }} $PKG_FLAG
+
+      - name: Verification skipped — this channel declares no URL
+        if: steps.verifiable.outputs.url == ''
+        run: |
+          echo "::warning title=Deploy verification SKIPPED::Channel '${{ inputs.channel }}' declares no channels.<channel>.url, so there is no live environment to check. Green on this run does NOT mean verified."
+          {
+            echo "### ⚠ Deploy verification SKIPPED"
+            echo ""
+            echo "Channel \`${{ inputs.channel }}\` declares no \`channels.<channel>.url\`, so there was no live environment to verify."
+            echo ""
+            echo "**Green on this run does not mean verified.** Declare a channel URL to close this gap."
+          } >> "$GITHUB_STEP_SUMMARY"
