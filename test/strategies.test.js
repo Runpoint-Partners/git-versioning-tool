@@ -68,6 +68,21 @@ test('server-ssh.deploy runs preRemote box steps after rsync, before npm ci', as
   assert.ok(ssh.indexOf('prep.sh') < ssh.indexOf('npm ci'), 'preRemote runs before npm ci');
 });
 
+test('server-ssh.deploy runs postRemote readiness gates after pm2 save', async () => {
+  const lines = [];
+  await strategies.load('server-ssh').deploy({
+    cfg: { appName: 'myapp', deploy: {
+      host: 'box', appRoot: '/srv/myapp', sshKey: '/tmp/key',
+      processes: [{ name: 'myapp', script: 'index.js' }],
+      postRemote: ['bash scripts/deploy/wait-ready.sh'],
+    } },
+    dryRun: true, log: (m) => lines.push(m),
+  });
+  const ssh = lines.find((line) => line.includes('wait-ready.sh'));
+  assert.ok(ssh, 'postRemote commands should appear in the ssh chain');
+  assert.ok(ssh.indexOf('pm2 save') < ssh.indexOf('wait-ready.sh'), 'postRemote runs after pm2 save');
+});
+
 test('static-s3.deploy (dry-run) emits aws s3 sync to the prefixed bucket', async () => {
   const lines = [];
   await strategies.load('static-s3').deploy({
