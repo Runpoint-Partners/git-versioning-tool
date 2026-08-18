@@ -44,7 +44,7 @@ jobs:
 
       - name: Install rpv (public package; no consumer deps on the runner)
         # git+https (not the github: shorthand, which resolves to SSH and fails on a bare runner)
-        run: npm install -g git+https://github.com/Runpoint-Partners/git-versioning-tool.git#v1.2.0
+        run: npm install -g git+https://github.com/Runpoint-Partners/git-versioning-tool.git#v1.2.1
 
       - name: Resolve strategy
         id: strat
