@@ -12,7 +12,7 @@ on:
       channel:      { type: string, required: true,  description: "production | staging" }
       package:      { type: string, required: false, default: "", description: "monorepo package name" }
       release:      { type: string, required: false, default: "minor", description: "minor | major" }
-      rollback:     { type: string, required: false, default: "", description: "version to redeploy (e.g. 1.3.0)" }
+      rollback:     { type: string, required: false, default: "", description: "minor | major | version to redeploy (e.g. 1.3 or 1.3.0)" }
       ref:          { type: string, required: false, default: "main" }
       node-version: { type: string, required: false, default: "20" }
     secrets:
@@ -30,9 +30,36 @@ jobs:
       STAGING_URL: ${{ vars.STAGING_URL }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
-      DEPLOY_SSH_KEY_PATH: ${{ github.workspace }}/.rpv/deploy_key
-      PKG_FLAG: ${{ inputs.package != '' && format('--package={0}', inputs.package) || '' }}
+      # Expressions are data only: never substitute them into a run script.
+      RPV_CHANNEL: ${{ inputs.channel }}
+      RPV_PACKAGE: ${{ inputs.package }}
+      RPV_RELEASE: ${{ inputs.release }}
+      RPV_ROLLBACK: ${{ inputs.rollback }}
     steps:
+      - name: Validate workflow inputs
+        # Keep this before checkout, installation, credential setup and all release/deploy work.
+        # These are the workflow/verify channels and the CLI's actual release/rollback grammar.
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RPV_CHANNEL" in
+            production|staging) ;;
+            *) printf '%s\n' 'channel must be production or staging' >&2; exit 2 ;;
+          esac
+          case "$RPV_RELEASE" in
+            ''|minor|major) ;;
+            *) printf '%s\n' 'release must be empty, minor or major' >&2; exit 2 ;;
+          esac
+          case "$RPV_ROLLBACK" in
+            ''|minor|major) ;;
+            *)
+              if [[ ! "$RPV_ROLLBACK" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+                printf '%s\n' 'rollback must be empty, minor, major or MAJOR.MINOR[.PATCH]' >&2
+                exit 2
+              fi
+              ;;
+          esac
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -48,18 +75,35 @@ jobs:
 
       - name: Resolve strategy
         id: strat
-        run: echo "name=$(rpv config get deploy.strategy --channel=${{ inputs.channel }} $PKG_FLAG)" >> "$GITHUB_OUTPUT"
+        # runner is available in step env, not job env. Bind the same path at every CLI step
+        # that can read config; server-ssh rsyncs ./, so the key stays outside that checkout.
+        env:
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
+        run: |
+          set -euo pipefail
+          strategy="$(rpv config get deploy.strategy "--channel=$RPV_CHANNEL" "--package=$RPV_PACKAGE")"
+          # Only these two strategies need credential setup here. Custom module paths remain
+          # supported, but raw config strings must not become additional workflow output lines.
+          case "$strategy" in
+            server-ssh|static-s3) printf 'name=%s\n' "$strategy" >> "$GITHUB_OUTPUT" ;;
+            *) printf '%s\n' 'name=other' >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Configure SSH (server-ssh)
         if: steps.strat.outputs.name == 'server-ssh'
+        env:
+          RPV_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          RPV_SSH_KEY_DIR: ${{ runner.temp }}/rpv-ssh
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
         run: |
           set -euo pipefail
-          install -m 700 -d ~/.ssh "$(dirname "$DEPLOY_SSH_KEY_PATH")"
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$DEPLOY_SSH_KEY_PATH"
+          umask 077
+          install -m 700 -d ~/.ssh "$RPV_SSH_KEY_DIR"
+          printf '%s\n' "$RPV_SSH_KEY" > "$DEPLOY_SSH_KEY_PATH"
           chmod 600 "$DEPLOY_SSH_KEY_PATH"
           # Resolve the PER-CHANNEL host (channels.<channel>.deploy.host overrides the base) so a
           # separate staging box is keyscanned — not the base/production host.
-          host="$(rpv config get deploy.host --channel=${{ inputs.channel }} $PKG_FLAG)"
+          host="$(rpv config get deploy.host "--channel=$RPV_CHANNEL" "--package=$RPV_PACKAGE")"
           ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Configure AWS (static-s3)
@@ -71,54 +115,85 @@ jobs:
 
       - name: Resolve release
         id: rel
+        env:
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
         run: |
           set -euo pipefail
           # Staging is continuous (deploys on every push) — it NEVER cuts a release tag; it stamps the
           # current PATCH version (rpv stamp's default) instead. Only production cuts vMAJOR.MINOR.0 tags.
-          if [ "${{ inputs.channel }}" != "production" ] && [ -z "${{ inputs.rollback }}" ]; then
+          if [ "$RPV_CHANNEL" != "production" ] && [ -z "$RPV_ROLLBACK" ]; then
             echo "create=false" >> "$GITHUB_OUTPUT"
             echo "version=" >> "$GITHUB_OUTPUT"
             echo "tag=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -n "${{ inputs.rollback }}" ]; then
-            rb="${{ inputs.rollback }}"
-            if echo "$rb" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-              info="$(rpv rollback-target "$rb" "$rb")"            # explicit version
+          if [ -n "$RPV_ROLLBACK" ]; then
+            rb="$RPV_ROLLBACK"
+            if [[ "$rb" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+              # rollbackTarget accepts X.Y or X.Y.Z as a spec, but its from-version requires
+              # three components. The spec still selects vX.Y.0 regardless of the input patch.
+              current="$rb"
+              if [[ "$rb" =~ ^[0-9]+\.[0-9]+$ ]]; then current="$rb.0"; fi
+              info="$(rpv rollback-target "$current" "$rb")"
             else
-              url="$(rpv config get channels.${{ inputs.channel }}.url $PKG_FLAG)" # spec (minor/major) relative to live
-              current="$(curl -fsS "$url/version" | jq -r .version)"
+              url="$(rpv config get "channels.$RPV_CHANNEL.url" "--package=$RPV_PACKAGE")"
+              current="$(curl -fsS -- "$url/version" | jq -r .version)"
+              if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                printf '%s\n' 'live version must be MAJOR.MINOR.PATCH' >&2
+                exit 2
+              fi
               info="$(rpv rollback-target "$current" "$rb")"
             fi
-            git checkout --quiet "$(echo "$info" | jq -r .tag)"        # deploy the rolled-back code
             create=false
           else
-            info="$(rpv resolve-release --release=${{ inputs.release }})"
-            create="$(echo "$info" | jq -r .createTag)"
+            info="$(rpv resolve-release "--release=${RPV_RELEASE:-minor}")"
+            create="$(printf '%s\n' "$info" | jq -r .createTag)"
           fi
-          echo "create=$create" >> "$GITHUB_OUTPUT"
-          echo "version=$(echo "$info" | jq -r .version)" >> "$GITHUB_OUTPUT"
-          echo "tag=$(echo "$info" | jq -r .tag)" >> "$GITHUB_OUTPUT"
+          version="$(printf '%s\n' "$info" | jq -r .version)"
+          tag="$(printf '%s\n' "$info" | jq -r .tag)"
+          # Bound data from the CLI before checkout, GITHUB_OUTPUT, tag creation or stamping.
+          # All releases/rollback targets are vMAJOR.MINOR.0, not arbitrary refs or options.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.0$ ]] || [ "$tag" != "v$version" ]; then
+            printf '%s\n' 'invalid release version or tag' >&2
+            exit 2
+          fi
+          case "$create" in
+            true|false) ;;
+            *) printf '%s\n' 'invalid createTag value' >&2; exit 2 ;;
+          esac
+          if [ -n "$RPV_ROLLBACK" ]; then
+            git checkout --quiet --detach "refs/tags/$tag"
+          fi
+          printf 'create=%s\nversion=%s\ntag=%s\n' "$create" "$version" "$tag" >> "$GITHUB_OUTPUT"
 
       - name: Cut release tag
         if: steps.rel.outputs.create == 'true'
+        env:
+          RPV_TAG: ${{ steps.rel.outputs.tag }}
+          RPV_VERSION: ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.rel.outputs.tag }}" -m "Release ${{ steps.rel.outputs.version }} (${{ inputs.channel }})"
-          git push origin "${{ steps.rel.outputs.tag }}"
+          git tag -a -m "Release $RPV_VERSION ($RPV_CHANNEL)" -- "$RPV_TAG"
+          git push origin "refs/tags/$RPV_TAG"
 
       - name: Stamp provenance
+        env:
+          RPV_VERSION: ${{ steps.rel.outputs.version }}
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
         run: |
-          if [ -n "${{ steps.rel.outputs.version }}" ]; then
-            rpv stamp --channel=${{ inputs.channel }} --version="${{ steps.rel.outputs.version }}" $PKG_FLAG
+          set -euo pipefail
+          if [ -n "$RPV_VERSION" ]; then
+            rpv stamp "--channel=$RPV_CHANNEL" "--version=$RPV_VERSION" "--package=$RPV_PACKAGE"
           else
-            rpv stamp --channel=${{ inputs.channel }} $PKG_FLAG   # staging: stamp the current PATCH version
+            rpv stamp "--channel=$RPV_CHANNEL" "--package=$RPV_PACKAGE" # staging: current PATCH version
           fi
 
       - name: Deploy
-        run: rpv deploy --channel=${{ inputs.channel }} $PKG_FLAG
+        env:
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
+        run: rpv deploy "--channel=$RPV_CHANNEL" "--package=$RPV_PACKAGE"
 
       # ── VERIFICATION IS A GATE, NOT A NOTE ──────────────────────────────────────────────────
       # This step used to run under `continue-on-error: true`, justified as "informational;
@@ -140,25 +215,47 @@ jobs:
       # Green on this job now means the live environment really is on the commit this run shipped.
       - name: Can this channel be verified?
         id: verifiable
+        env:
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
         run: |
           set -euo pipefail
           # No `|| true`: if config cannot be resolved this must fail the deploy, not quietly
           # resolve to empty and skip verification.
-          url="$(rpv config get channelConfig.url --channel=${{ inputs.channel }} $PKG_FLAG)"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+          url="$(rpv config get channelConfig.url "--channel=$RPV_CHANNEL" "--package=$RPV_PACKAGE")"
+          # The condition needs only presence; never write the raw URL to GITHUB_OUTPUT.
+          if [ -n "$url" ]; then
+            printf '%s\n' 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'present=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Verify
-        if: steps.verifiable.outputs.url != ''
-        run: rpv verify --${{ inputs.channel }} $PKG_FLAG
+        if: steps.verifiable.outputs.present == 'true'
+        env:
+          DEPLOY_SSH_KEY_PATH: ${{ runner.temp }}/rpv-ssh/deploy_key
+        # HEAD is the checkout just stamped/deployed, including an explicit ref or rollback.
+        run: rpv verify "--$RPV_CHANNEL" "--ref=HEAD" "--package=$RPV_PACKAGE"
 
       - name: Verification skipped — this channel declares no URL
-        if: steps.verifiable.outputs.url == ''
+        if: steps.verifiable.outputs.present == 'false'
         run: |
-          echo "::warning title=Deploy verification SKIPPED::Channel '${{ inputs.channel }}' declares no channels.<channel>.url, so there is no live environment to check. Green on this run does NOT mean verified."
+          echo "::warning title=Deploy verification SKIPPED::Channel '$RPV_CHANNEL' declares no channels.<channel>.url, so there is no live environment to check. Green on this run does NOT mean verified."
           {
             echo "### ⚠ Deploy verification SKIPPED"
             echo ""
-            echo "Channel \`${{ inputs.channel }}\` declares no \`channels.<channel>.url\`, so there was no live environment to verify."
+            echo "Channel \`$RPV_CHANNEL\` declares no \`channels.<channel>.url\`, so there was no live environment to verify."
             echo ""
             echo "**Green on this run does not mean verified.** Declare a channel URL to close this gap."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove SSH key
+        # Run after failures and normal cancellation too, provided the runner can still run steps.
+        # A killed/lost runner cannot execute cleanup; runner temp disposal remains the fallback.
+        if: always() && steps.strat.outputs.name == 'server-ssh'
+        env:
+          # Derive the fixed cleanup target from runner context, never caller input or CLI output.
+          RPV_SSH_KEY_DIR: ${{ runner.temp }}/rpv-ssh
+        run: |
+          set -euo pipefail
+          rm -f -- "$RPV_SSH_KEY_DIR/deploy_key"
+          if [ -d "$RPV_SSH_KEY_DIR" ]; then rmdir -- "$RPV_SSH_KEY_DIR"; fi
